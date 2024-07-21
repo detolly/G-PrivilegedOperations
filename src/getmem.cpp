@@ -119,7 +119,7 @@ void check_map(long pid, map m)
 	const auto buffer = new std::uint8_t[m.size()];
 	
 	const auto proc_memory_path = std::format("/proc/{}/mem", pid);
-	auto fp = fopen("/proc/", "rb");
+	auto fp = fopen(proc_memory_path.c_str(), "rb");
 	if (!fp) {
 	 	perror("Could not read memory");
 		delete[] buffer;
