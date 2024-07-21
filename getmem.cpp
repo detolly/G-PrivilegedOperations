@@ -1,9 +1,11 @@
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
+#include <span>
 #include <array>
 #include <vector>
 #include <fstream>
@@ -54,13 +56,13 @@ std::vector<map> get_process_maps(long pid)
 	return maps;
 }
 
-void check_valid(std::uint8_t* table_ptr, std::size_t table_size)
+void check_valid(std::span<std::uint8_t> table_span)
 {
-	auto table = std::array<std::uint8_t, 256>{ };
-	
-	for(auto i = 0; i < table_size; i += RC4_TABLE_ALIGNMENT)
+	auto table = std::array<std::uint8_t, RC4_TABLE_SIZE>{ };
+
+	for(auto i = 0; i < table_span.size(); i += RC4_TABLE_ALIGNMENT)
 	{
-		const auto value = *reinterpret_cast<std::uint64_t*>(table_ptr + i);
+		const auto value = *reinterpret_cast<std::uint64_t*>(&table_span.at(i));
 		const auto is_valid = (value & RC4_INVALID_MASK_SHOCKWAVE) == 0;
 
 		if (!is_valid)
@@ -76,16 +78,16 @@ void check_valid(std::uint8_t* table_ptr, std::size_t table_size)
 	puts("");
 }
 
-void check_map_offset(std::uint64_t offset, std::uint8_t* buffer, std::uint64_t buffer_size)
+void check_map_offset(std::uint64_t offset, std::span<std::uint8_t> buffer)
 {
 	auto valid_entries = 0;
-	auto value_to_index = std::array<std::uint16_t, RC4_TABLE_SIZE>{ RC4_INVALID_VALUE };
-	auto index_to_value = std::array<std::uint16_t, RC4_TABLE_SIZE>{ RC4_INVALID_VALUE };
+	auto value_to_index = std::array<std::size_t, RC4_TABLE_SIZE>{ RC4_INVALID_VALUE };
+	auto index_to_value = std::array<std::size_t, RC4_TABLE_SIZE>{ RC4_INVALID_VALUE };
 
-	for(auto i = 0; i < buffer_size; i+= RC4_TABLE_ALIGNMENT)
+	for(auto i = 0; i < buffer.size(); i+= RC4_TABLE_ALIGNMENT)
 	{
 		const auto value = buffer[i];
-		const std::uint16_t table_index = (i / RC4_TABLE_ALIGNMENT) % RC4_TABLE_SIZE;
+		const std::size_t table_index = (i / RC4_TABLE_ALIGNMENT) % RC4_TABLE_SIZE;
 
 		const auto old_value = index_to_value[table_index];
 		if (old_value != RC4_INVALID_VALUE)
@@ -109,7 +111,8 @@ void check_map_offset(std::uint64_t offset, std::uint8_t* buffer, std::uint64_t 
 			const auto table_pos = i - (RC4_TABLE_SIZE - 1) * RC4_TABLE_ALIGNMENT;
 			const auto table_size = RC4_TABLE_SIZE * RC4_TABLE_ALIGNMENT;
 
-			check_valid(buffer + table_pos, table_size);
+			assert(table_pos + table_size < buffer.size());
+			check_valid(buffer.subspan(table_pos, table_size));
 		}
 	}
 }
@@ -126,11 +129,12 @@ void check_map(long pid, map m)
 		return;
 	}
 
-	fseek(fp, m.start, SEEK_SET);
+	fseeko(fp, m.start, SEEK_SET);
 	fread(buffer, 1, m.size(), fp);
 	fclose(fp);
 
-	check_map_offset(0, buffer, m.size());
+	check_map_offset(0, { buffer, m.size() });
+	check_map_offset(4, { buffer, m.size() });
 	delete[] buffer;
 }
 
