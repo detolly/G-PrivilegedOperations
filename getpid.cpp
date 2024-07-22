@@ -11,10 +11,10 @@ int main(int argc, const char** argv)
 {
 	std::vector<std::string> terms;
 
-	for(int i = 1; i < argc; i++)
+	for(auto i = 1; i < argc; i++)
 		terms.push_back(std::string(argv[i]));
 
-	int pid = getpid();
+	auto pid = getpid();
 	const auto pid_string = std::to_string(pid);
 
 	const auto proc_path = std::filesystem::path("/proc/");
