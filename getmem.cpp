@@ -1,4 +1,6 @@
 
+#include <sys/uio.h>
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +32,7 @@ struct map
 };
 
 
-std::vector<map> get_process_maps(long pid)
+std::vector<map> get_process_maps(pid_t pid)
 {
 	std::vector<map> maps;
 
@@ -45,9 +47,12 @@ std::vector<map> get_process_maps(long pid)
 			const auto start = std::string(start_view);
 			const auto end = std::string(end_view);
 
-			auto m = map { .start = std::strtoull(start.c_str(), nullptr, 16), .end = std::strtoull(end.c_str(), nullptr, 16) };
-			if (m.size() > 4 * 1024 * 1024)
+			if (!permissions_view.view().contains("r"))
 				continue;
+
+			const auto m = map { .start = std::strtoull(start.c_str(), nullptr, 16), .end = std::strtoull(end.c_str(), nullptr, 16) };
+			// if (m.size() > 4 * 1024 * 1024)
+			// 	continue;
 
 			maps.push_back(m);
 		}
@@ -56,13 +61,13 @@ std::vector<map> get_process_maps(long pid)
 	return maps;
 }
 
-void check_valid(std::span<std::uint8_t> table_span)
+void check_valid(const std::span<const std::uint8_t> table_span)
 {
 	auto table = std::array<std::uint8_t, RC4_TABLE_SIZE>{ };
 
-	for(auto i = 0; i < table_span.size(); i += RC4_TABLE_ALIGNMENT)
+	for(auto i = 0uz; i < table_span.size(); i += RC4_TABLE_ALIGNMENT)
 	{
-		const auto value = *reinterpret_cast<std::uint64_t*>(&table_span.at(i));
+		const auto value = *reinterpret_cast<const std::uint64_t*>(&table_span[i]);
 		const auto is_valid = (value & RC4_INVALID_MASK_SHOCKWAVE) == 0;
 
 		if (!is_valid)
@@ -73,18 +78,18 @@ void check_valid(std::span<std::uint8_t> table_span)
 
 	for(const auto entry : table)
 	{
-		printf("%02x ", entry);
+		printf("%02x", entry);
 	}
 	puts("");
 }
 
-void check_map_offset(std::uint64_t offset, std::span<std::uint8_t> buffer)
+void check_map_offset(std::uint64_t offset, const std::span<const std::uint8_t> buffer)
 {
 	auto valid_entries = 0;
 	auto value_to_index = std::array<std::size_t, RC4_TABLE_SIZE>{ RC4_INVALID_VALUE };
 	auto index_to_value = std::array<std::size_t, RC4_TABLE_SIZE>{ RC4_INVALID_VALUE };
 
-	for(auto i = 0; i < buffer.size(); i+= RC4_TABLE_ALIGNMENT)
+	for(auto i = offset; i < buffer.size(); i+= RC4_TABLE_ALIGNMENT)
 	{
 		const auto value = buffer[i];
 		const std::size_t table_index = (i / RC4_TABLE_ALIGNMENT) % RC4_TABLE_SIZE;
@@ -117,30 +122,33 @@ void check_map_offset(std::uint64_t offset, std::span<std::uint8_t> buffer)
 	}
 }
 
-void check_map(long pid, map m)
+void check_map(pid_t pid, map m)
 {
-	const auto buffer = new std::uint8_t[m.size()];
-	
-	const auto proc_memory_path = std::format("/proc/{}/mem", pid);
-	auto fp = fopen(proc_memory_path.c_str(), "rb");
-	if (!fp) {
-	 	perror("Could not read memory");
+	std::uint8_t* const buffer = new std::uint8_t[m.size()]{ 0 };
+
+	iovec local{ .iov_base = buffer, .iov_len = m.size() };
+	iovec remote{ .iov_base = reinterpret_cast<void*>(m.start), .iov_len = m.size() };
+
+	auto rc = process_vm_readv(pid, &local, 1, &remote, 1, 0);
+	if (rc < 0) {
+		perror("Failed to read memory");
+		printf("\tat %08x\n", static_cast<std::uint32_t>(m.start));
 		delete[] buffer;
 		return;
 	}
-
-	fseeko(fp, m.start, SEEK_SET);
-	fread(buffer, 1, m.size(), fp);
-	fclose(fp);
-
+	
+	// for(std::uint64_t i = 0; i < 8; i++) {
+	// 	check_map_offset(i, { buffer, m.size() });
+	// }
 	check_map_offset(0, { buffer, m.size() });
 	check_map_offset(4, { buffer, m.size() });
+
 	delete[] buffer;
 }
 
 int main(int argc, const char** argv)
 {
-	const auto pid = std::atol(argv[1]);
+	const auto pid = pid_t{ std::atoi(argv[1]) };
 
 	const auto maps = get_process_maps(pid);
 	for(const auto m : maps)
