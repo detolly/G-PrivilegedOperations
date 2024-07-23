@@ -25,8 +25,12 @@ void remove_hostlines()
     }
     {
         auto host_file = std::ofstream(host_file_path, std::ios_base::trunc);
-        for(const auto& line : new_lines)
-            host_file << line << std::endl;
+        for(auto i = 0uz; i < new_lines.size(); i++)
+        {
+            host_file << new_lines[i];
+            if (i != new_lines.size())
+                host_file << std::endl;
+        }
     }
 }
 
