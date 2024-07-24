@@ -19,16 +19,15 @@ void remove_hostlines()
         std::string current_line;
         while(std::getline(host_file, current_line))
         {
-            if (current_line.find("#automated") == current_line.npos)
+            if (!current_line.contains("#automated"))
                 new_lines.push_back(current_line);
         }
     }
     {
         auto host_file = std::ofstream(host_file_path, std::ios_base::trunc);
-        for(auto i = 0uz; i < new_lines.size(); i++)
-        {
-            host_file << new_lines[i];
-            if (i != new_lines.size())
+        for(auto it = new_lines.begin(); it != new_lines.end(); it++) {
+            host_file << *it;
+            if (it != new_lines.end() - 1)
                 host_file << std::endl;
         }
     }
