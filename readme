@@ -1,1 +1,1 @@
-You might want to install the pkexec policy into /etc/polkit-1/rules.d/ folder in order for it to not spam you for permissions. This is voluntary.
+You might want to install the pkexec policy into /etc/polkit-1/rules.d/ directory in order for it to not spam you for permissions. This is voluntary.
