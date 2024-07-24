@@ -13,14 +13,17 @@
 #include <fstream>
 #include <string>
 #include <format>
+#include <optional>
 
 #include <ctre.hpp>
 
 using namespace ctre::literals;
 
-constexpr auto RC4_TABLE_ALIGNMENT = 8;
-constexpr auto RC4_TABLE_SIZE = 256;
-constexpr auto RC4_INVALID_MASK_SHOCKWAVE = 0xFFFFFFFB'FFFFFF00;
+constexpr static auto RC4_RAW_TABLE_ELEMENT_SIZE = 8;
+constexpr static auto RC4_TABLE_SIZE = 256;
+constexpr static auto RC4_INVALID_MASK_SHOCKWAVE = 0xFFFFFFFB'FFFFFF00;
+
+constexpr static auto RC4_RAW_TABLE_SIZE = RC4_RAW_TABLE_ELEMENT_SIZE * RC4_TABLE_SIZE;
 
 struct map
 {
@@ -37,19 +40,20 @@ std::vector<map> get_process_maps(pid_t pid)
 
     auto process_maps_file = std::ifstream{ std::format("/proc/{}/maps", pid) };
     std::string current_line;
-    
+
     while (std::getline(process_maps_file, current_line))
     {
-        if (const auto [matches, start_view, end_view, permissions_view, n1, n2, n3, trash] = 
-            ctre::match<"([A-Fa-f0-9]+)-([A-Fa-f0-9]+)\\s([rwxp\\-]{4})\\s([A-Fa-f0-9]+)\\s(\\d+:\\d+)\\s(\\d+)\\s+(.*)">(current_line); matches)
+        if (const auto [matches, start_view, end_view] = 
+            ctre::match<"([A-Fa-f0-9]+)-([A-Fa-f0-9]+)\\s.+">(current_line); matches)
         {
             const auto start = std::string(start_view);
             const auto end = std::string(end_view);
 
-            // if (!permissions_view.view().contains("r"))
-            //     continue;
+            const auto m = map { 
+                .start = std::strtoull(start.c_str(), nullptr, 16),
+                .end = std::strtoull(end.c_str(), nullptr, 16),
+            };
 
-            const auto m = map { .start = std::strtoull(start.c_str(), nullptr, 16), .end = std::strtoull(end.c_str(), nullptr, 16) };
             // if (m.size() > 4 * 1024 * 1024)
             //     continue;
 
@@ -63,55 +67,59 @@ std::vector<map> get_process_maps(pid_t pid)
 void print_table(const std::array<std::uint8_t, RC4_TABLE_SIZE>& table)
 {
     for(const auto entry : table)
-        printf("%02X", entry);
+        printf("%02x", entry);
 
     printf("\n");
 }
 
-void extract_table(const std::span<const std::uint8_t> table_span)
+constexpr std::optional<std::array<std::uint8_t, RC4_TABLE_SIZE>> extract_table(const std::span<const std::uint8_t> table_span)
 {
     auto table = std::array<std::uint8_t, RC4_TABLE_SIZE>{ 0 };
     auto values_already_seen = std::array<bool, RC4_TABLE_SIZE>{ false };
 
-    for(auto i = 0uz; i < RC4_TABLE_SIZE * RC4_TABLE_ALIGNMENT; i += RC4_TABLE_ALIGNMENT)
+    if (table_span.size() != RC4_RAW_TABLE_SIZE)
+        return {};
+
+    for(auto i = 0uz; i < table_span.size(); i += RC4_RAW_TABLE_ELEMENT_SIZE)
     {
-        const auto value = *reinterpret_cast<const std::uint64_t*>(&table_span[i]);
-        const auto extracted_value = static_cast<std::uint8_t>(value & 0xFF);
-
+        const auto extracted_value = table_span[i];
         if (values_already_seen[extracted_value])
-            return;
+            return {};
 
-        table[i / RC4_TABLE_ALIGNMENT] = extracted_value;
+        table[i / RC4_RAW_TABLE_ELEMENT_SIZE] = extracted_value;
         values_already_seen[extracted_value] = true;
     }
 
-    print_table(table);
+    return table;
 }
 
-void check_map_tables(std::uint64_t offset, const std::span<const std::uint8_t> buffer)
+constexpr std::vector<std::array<std::uint8_t, RC4_TABLE_SIZE>> check_map_tables(const std::uint64_t offset, const std::span<const std::uint8_t> buffer)
 {
+    std::vector<std::array<std::uint8_t, RC4_TABLE_SIZE>> tables;
+
     auto valid_entries = 0;
-
-    for(auto i = offset; i < buffer.size(); i += RC4_TABLE_ALIGNMENT)
+    for(auto i = offset; i < buffer.size(); i += RC4_RAW_TABLE_ELEMENT_SIZE)
     {
-        const auto value = *reinterpret_cast<const std::uint64_t*>(&buffer[i]);
-
-        if ((value & RC4_INVALID_MASK_SHOCKWAVE) != 0 || value == 0) {
+        const auto value = *reinterpret_cast<const std::uint64_t*>(buffer.data() + i);
+        if ((value & RC4_INVALID_MASK_SHOCKWAVE) != 0) {
             valid_entries = 0;
             continue;
         }
 
         valid_entries++;
-
         if (valid_entries == RC4_TABLE_SIZE) {
-            constexpr auto size = RC4_TABLE_ALIGNMENT * RC4_TABLE_SIZE;
-            extract_table({ buffer.begin() + static_cast<long>(i) - size + RC4_TABLE_ALIGNMENT, size });
+            const auto maybe_table = extract_table({ buffer.data() + i - RC4_RAW_TABLE_SIZE + RC4_RAW_TABLE_ELEMENT_SIZE, RC4_RAW_TABLE_SIZE });
+            if (maybe_table.has_value()) {
+                tables.push_back(maybe_table.value());
+            }
             valid_entries--;
         }
     }
+
+    return tables;
 }
 
-void check_map(pid_t pid, map m)
+void check_map(const pid_t pid, const map m)
 {
     std::uint8_t* const buffer = new std::uint8_t[m.size()]{ 0 };
 
@@ -126,11 +134,16 @@ void check_map(pid_t pid, map m)
         return;
     }
 
-    // for(std::uint64_t i = 0; i < RC4_TABLE_ALIGNMENT; i++) {
-    //     check_map_tables(i, { buffer, m.size() });
-    // }
-    check_map_tables(0, { buffer, m.size() });
-    check_map_tables(4, { buffer, m.size() });
+    constexpr auto check_and_print_tables_with_offset = [](const auto* const buffer, const std::uint64_t offset, const map _map) {
+        for(const auto& table : check_map_tables(offset, { buffer, _map.size() }))
+            print_table(table);
+    };
+
+    // for(auto i = 0uz; i < RC4_RAW_TABLE_ELEMENT_SIZE; i++)
+    //     check_and_print_tables_with_offset(buffer, i, m);
+
+    check_and_print_tables_with_offset(buffer, 0, m);
+    check_and_print_tables_with_offset(buffer, 4, m);
 
     delete[] buffer;
 }
@@ -140,11 +153,9 @@ int main(int argc, const char** argv)
     const auto pid = pid_t{ std::atoi(argv[1]) };
 
     const auto maps = get_process_maps(pid);
-
+    fprintf(stderr, "number of maps: %lu\n", maps.size());
     for(const auto m : maps)
-    {
         check_map(pid, m);
-    }
 }
 
 
