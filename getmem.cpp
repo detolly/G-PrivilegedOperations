@@ -2,6 +2,7 @@
 #include <sys/uio.h>
 
 #include <cassert>
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -9,6 +10,7 @@
 
 #include <span>
 #include <array>
+#include <utility>
 #include <vector>
 #include <fstream>
 #include <string>
@@ -21,6 +23,39 @@ using namespace ctre::literals;
 
 constexpr static auto RC4_TABLE_SIZE = 256;
 constexpr static auto RC4_INVALID_MASK_SHOCKWAVE = 0xFFFFFFFB'FFFFFF00;
+constexpr static auto RC4_INVALID_MASK_SHOCKWAVE2 = 0xFFFFFF00;
+
+template<auto size>
+struct rc4_entry_raw {
+    std::array<std::uint8_t, size> raw;
+
+    static_assert(size == 8 || size == 4);
+
+    constexpr auto table_entry() const
+    {
+        return raw[0];
+    }
+    
+    constexpr auto fits_mask() const
+    {
+        if constexpr (size == 4) {
+            return (*reinterpret_cast<const std::uint32_t*>(&raw) & RC4_INVALID_MASK_SHOCKWAVE2) == 0;
+        }
+
+        if constexpr (size == 8) {
+            return (*reinterpret_cast<const std::uint64_t*>(&raw) & RC4_INVALID_MASK_SHOCKWAVE) == 0;
+        }
+
+        std::unreachable();
+    }
+};
+
+static_assert(sizeof(rc4_entry_raw<4>) == 4);
+static_assert(sizeof(rc4_entry_raw<8>) == 8);
+
+template<auto sz> using rc4_table_raw = std::array<rc4_entry_raw<sz>, RC4_TABLE_SIZE>;
+
+using rc4_table = std::array<std::uint8_t, RC4_TABLE_SIZE>;
 
 struct map
 {
@@ -29,21 +64,6 @@ struct map
 
     std::uint64_t size() const { return end - start; }
 };
-
-struct rc4_entry_raw
-{
-    union {
-        std::uint64_t big;
-        std::uint32_t medium[2];
-        std::uint8_t small[8];
-    } value;
-
-};
-
-static_assert(sizeof(rc4_entry_raw) == 8);
-
-using rc4_table = std::array<std::uint8_t, RC4_TABLE_SIZE>;
-using rc4_table_raw = std::array<rc4_entry_raw, RC4_TABLE_SIZE>;
 
 std::vector<map> get_process_maps(pid_t pid)
 {
@@ -54,16 +74,20 @@ std::vector<map> get_process_maps(pid_t pid)
 
     while (std::getline(process_maps_file, current_line))
     {
-        if (const auto [matches, start_view, end_view] = 
-            ctre::match<"([A-Fa-f0-9]+)-([A-Fa-f0-9]+)\\s.+">(current_line); matches)
+        if (const auto [matches, start_view, end_view] = ctre::match<"([A-Fa-f0-9]+)-([A-Fa-f0-9]+)\\s.+">(current_line); matches)
         {
             const auto start = std::string(start_view);
             const auto end = std::string(end_view);
 
-            const auto m = map { 
+            // fprintf(stderr, "%s - %s\t", start.c_str(), end.c_str());
+
+            const auto m = map {
                 .start = std::strtoull(start.c_str(), nullptr, 16),
                 .end = std::strtoull(end.c_str(), nullptr, 16),
             };
+
+            // fprintf(stderr, "%08x%08x - %08x%08x\n", static_cast<std::uint32_t>(m.start >> 32), static_cast<std::uint32_t>(m.start),
+            //                                          static_cast<std::uint32_t>(m.end >> 32), static_cast<std::uint32_t>(m.end));
 
             // if (m.size() > 4 * 1024 * 1024)
             //     continue;
@@ -75,22 +99,18 @@ std::vector<map> get_process_maps(pid_t pid)
     return maps;
 }
 
-void print_table(const rc4_table& table)
-{
-    for(const auto entry : table)
-        printf("%02x", entry);
 
-    printf("\n");
-}
-
-constexpr std::optional<rc4_table> extract_table(const rc4_table_raw& raw_table)
+template<auto sz>
+constexpr std::optional<rc4_table> extract_table(const rc4_table_raw<sz>& raw_table)
 {
     auto table = rc4_table{ 0 };
-    auto values_already_seen = std::array<bool, RC4_TABLE_SIZE>{ false };
+    auto values_already_seen = std::array<bool, RC4_TABLE_SIZE>{};
+    values_already_seen.fill(false);
 
     for(auto i = 0uz; i < raw_table.size(); i++)
     {
-        const auto extracted_value = raw_table[i].value.small[0];
+        const auto extracted_value = raw_table[i].table_entry();
+
         if (values_already_seen[extracted_value])
             return {};
 
@@ -101,37 +121,56 @@ constexpr std::optional<rc4_table> extract_table(const rc4_table_raw& raw_table)
     return table;
 }
 
-constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entry_raw> buffer)
+template<auto sz>
+constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entry_raw<sz>> buffer)
 {
     std::vector<rc4_table> tables;
 
     if (buffer.size() < RC4_TABLE_SIZE)
         return tables;
 
-    auto start = buffer.begin();
-
-    for(auto it = buffer.begin(); it != buffer.end(); it++)
+    for(auto it = buffer.begin(); it != buffer.end() - RC4_TABLE_SIZE; it++)
     {
-        const auto& entry = *it;
+        const auto& current_table = reinterpret_cast<const rc4_table_raw<sz>&>(*it);
 
-        if ((entry.value.big & RC4_INVALID_MASK_SHOCKWAVE) != 0) {
-            start = it + 1;
+        auto is_good = true;
+        for(const auto& entry : current_table)
+        {
+            if (!entry.fits_mask()) {
+                is_good = false;
+                break;
+            }
         }
 
-        else if (it - start == RC4_TABLE_SIZE) {
-            const auto& current_table = reinterpret_cast<const rc4_table_raw&>(*start);
-            const auto maybe_table = extract_table(current_table);
-            if (maybe_table.has_value()) {
-                tables.push_back(maybe_table.value());
-            }
-            start++;
+        if (!is_good)
+            continue;
+
+        const auto maybe_table = extract_table(current_table);
+        if (maybe_table.has_value()) {
+            tables.push_back(maybe_table.value());
         }
     }
 
     return tables;
 }
 
-void check_map(const pid_t pid, const map m)
+void print_table(const rc4_table& table)
+{
+    for(const auto entry : table)
+        printf("%02x", entry);
+
+    printf("\n");
+}
+
+template<auto sz>
+void check_and_print_tables_with_offset(const auto& buffer, const std::size_t offset) {
+    const auto span = std::span<const rc4_entry_raw<sz>> { reinterpret_cast<const rc4_entry_raw<sz>*>(buffer.data() + offset), (buffer.size() - offset) / sz };
+
+    for(const auto& table : check_map_tables<sz>(span))
+        print_table(table);
+};
+
+void check_map(const pid_t pid, const map m) noexcept
 {
     std::vector<std::uint8_t> buffer;
     buffer.resize(m.size());
@@ -143,31 +182,32 @@ void check_map(const pid_t pid, const map m)
     if (rc < 0)
         return;
 
-    constexpr auto check_and_print_tables_with_offset = [](const auto& buffer, const std::size_t offset) {
-        const auto span = std::span<const rc4_entry_raw> {
-            reinterpret_cast<const rc4_entry_raw*>(buffer.data() + offset), 
-            (buffer.size() - offset) / sizeof(rc4_entry_raw) 
-        };
+    for(auto i = 0uz; i < 8; i++)
+        check_and_print_tables_with_offset<8>(buffer, i);
 
-        for(const auto& table : check_map_tables(span))
-            print_table(table);
-    };
+    for(auto i = 0uz; i < 4; i++)
+        check_and_print_tables_with_offset<4>(buffer, i);
 
-    // for(auto i = 0uz; i < RC4_RAW_TABLE_ELEMENT_SIZE; i++)
-    //     check_and_print_tables_with_offset(buffer, i);
-
-    check_and_print_tables_with_offset(buffer, 0);
-    check_and_print_tables_with_offset(buffer, 4);
+    // check_and_print_tables_with_offset<8>(buffer, 0);
+    // check_and_print_tables_with_offset<8>(buffer, 4);
+    //
+    // check_and_print_tables_with_offset<4>(buffer, 0);
+    // check_and_print_tables_with_offset<4>(buffer, 2);
 }
 
 int main(int argc, const char** argv)
 {
     const auto pid = pid_t{ std::atoi(argv[1]) };
-
     const auto maps = get_process_maps(pid);
+
     fprintf(stderr, "number of maps: %lu\n", maps.size());
+    
     for(const auto m : maps)
         check_map(pid, m);
+
+    fputs("Done", stderr);
+
+    return 0;
 }
 
 
