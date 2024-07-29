@@ -30,12 +30,12 @@ struct rc4_entry_raw {
  
     const std::uint8_t raw[size];
 
-    constexpr auto table_entry() const
+    constexpr inline auto table_entry() const
     {
         return raw[0];
     }
 
-    constexpr auto fits_mask() const
+    constexpr inline auto fits_mask() const
     {
         if constexpr (size == 4) {
             return (*reinterpret_cast<const std::uint32_t*>(&raw) & RC4_INVALID_MASK_FLASH) == 0;
@@ -127,15 +127,18 @@ constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entr
     if (buffer.size() < RC4_TABLE_SIZE)
         return tables;
 
-    for(auto it = buffer.begin(); it != buffer.end() - RC4_TABLE_SIZE; it++)
+    for(auto it = buffer.begin(); it <= buffer.end() - RC4_TABLE_SIZE; it++)
     {
         const auto& current_table = reinterpret_cast<const rc4_table_raw<sz>&>(*it);
 
         auto is_good = true;
-        for(const auto& entry : current_table)
+        for(auto i = 0uz; i < current_table.size(); i++)
         {
+            const auto& entry = current_table[i];
+
             if (!entry.fits_mask()) {
                 is_good = false;
+                it += static_cast<long>(i);
                 break;
             }
         }
@@ -184,17 +187,11 @@ void check_map(const pid_t pid, const map m) noexcept
     if (rc < 0)
         return;
 
-    // for(auto i = 0uz; i < 8; i++)
-    //     check_and_print_tables_with_offset<8>(buffer, i);
-    //
-    // for(auto i = 0uz; i < 4; i++)
-    //     check_and_print_tables_with_offset<4>(buffer, i);
-
     check_and_print_tables_with_offset<8>(buffer, 0);
     check_and_print_tables_with_offset<8>(buffer, 4);
 
+    // flash:
     // check_and_print_tables_with_offset<4>(buffer, 0);
-    // check_and_print_tables_with_offset<4>(buffer, 2);
 }
 
 int main(int argc, const char** argv)
