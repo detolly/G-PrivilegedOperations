@@ -1,4 +1,3 @@
-
 #include <sys/uio.h>
 
 #include <cassert>
@@ -21,25 +20,25 @@
 
 using namespace ctre::literals;
 
-constexpr static auto RC4_TABLE_SIZE = 256;
-constexpr static auto RC4_INVALID_MASK_SHOCKWAVE = 0xFFFFFFFB'FFFFFF00;
-constexpr static auto RC4_INVALID_MASK_SHOCKWAVE2 = 0xFFFFFF00;
+constexpr static auto RC4_TABLE_SIZE                = 256;
+constexpr static auto RC4_INVALID_MASK_SHOCKWAVE    = 0xFFFFFFFB'FFFFFF00;
+constexpr static auto RC4_INVALID_MASK_FLASH        = 0xFFFFFF00;
 
 template<auto size>
 struct rc4_entry_raw {
-    std::array<std::uint8_t, size> raw;
-
     static_assert(size == 8 || size == 4);
+ 
+    const std::uint8_t raw[size];
 
     constexpr auto table_entry() const
     {
         return raw[0];
     }
-    
+
     constexpr auto fits_mask() const
     {
         if constexpr (size == 4) {
-            return (*reinterpret_cast<const std::uint32_t*>(&raw) & RC4_INVALID_MASK_SHOCKWAVE2) == 0;
+            return (*reinterpret_cast<const std::uint32_t*>(&raw) & RC4_INVALID_MASK_FLASH) == 0;
         }
 
         if constexpr (size == 8) {
@@ -65,7 +64,7 @@ struct map
     std::uint64_t size() const { return end - start; }
 };
 
-std::vector<map> get_process_maps(pid_t pid)
+std::vector<map> get_process_maps(pid_t pid) noexcept
 {
     std::vector<map> maps;
 
@@ -99,9 +98,8 @@ std::vector<map> get_process_maps(pid_t pid)
     return maps;
 }
 
-
 template<auto sz>
-constexpr std::optional<rc4_table> extract_table(const rc4_table_raw<sz>& raw_table)
+constexpr std::optional<rc4_table> extract_table(const rc4_table_raw<sz>& raw_table) noexcept
 {
     auto table = rc4_table{ 0 };
     auto values_already_seen = std::array<bool, RC4_TABLE_SIZE>{};
@@ -122,7 +120,7 @@ constexpr std::optional<rc4_table> extract_table(const rc4_table_raw<sz>& raw_ta
 }
 
 template<auto sz>
-constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entry_raw<sz>> buffer)
+constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entry_raw<sz>> buffer) noexcept
 {
     std::vector<rc4_table> tables;
 
@@ -154,7 +152,7 @@ constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entr
     return tables;
 }
 
-void print_table(const rc4_table& table)
+void print_table(const rc4_table& table) noexcept
 {
     for(const auto entry : table)
         printf("%02x", entry);
@@ -163,8 +161,12 @@ void print_table(const rc4_table& table)
 }
 
 template<auto sz>
-void check_and_print_tables_with_offset(const auto& buffer, const std::size_t offset) {
-    const auto span = std::span<const rc4_entry_raw<sz>> { reinterpret_cast<const rc4_entry_raw<sz>*>(buffer.data() + offset), (buffer.size() - offset) / sz };
+void check_and_print_tables_with_offset(const auto& buffer, const std::size_t offset) noexcept
+{
+    const auto span = std::span<const rc4_entry_raw<sz>> { 
+        reinterpret_cast<const rc4_entry_raw<sz>*>(reinterpret_cast<std::uint64_t>(buffer.data()) + offset), 
+        (buffer.size() - offset) / sz 
+    };
 
     for(const auto& table : check_map_tables<sz>(span))
         print_table(table);
@@ -182,15 +184,15 @@ void check_map(const pid_t pid, const map m) noexcept
     if (rc < 0)
         return;
 
-    for(auto i = 0uz; i < 8; i++)
-        check_and_print_tables_with_offset<8>(buffer, i);
-
-    for(auto i = 0uz; i < 4; i++)
-        check_and_print_tables_with_offset<4>(buffer, i);
-
-    // check_and_print_tables_with_offset<8>(buffer, 0);
-    // check_and_print_tables_with_offset<8>(buffer, 4);
+    // for(auto i = 0uz; i < 8; i++)
+    //     check_and_print_tables_with_offset<8>(buffer, i);
     //
+    // for(auto i = 0uz; i < 4; i++)
+    //     check_and_print_tables_with_offset<4>(buffer, i);
+
+    check_and_print_tables_with_offset<8>(buffer, 0);
+    check_and_print_tables_with_offset<8>(buffer, 4);
+
     // check_and_print_tables_with_offset<4>(buffer, 0);
     // check_and_print_tables_with_offset<4>(buffer, 2);
 }
@@ -201,7 +203,7 @@ int main(int argc, const char** argv)
     const auto maps = get_process_maps(pid);
 
     fprintf(stderr, "number of maps: %lu\n", maps.size());
-    
+
     for(const auto m : maps)
         check_map(pid, m);
 
