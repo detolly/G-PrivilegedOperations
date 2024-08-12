@@ -39,11 +39,11 @@ struct rc4_entry_raw {
     constexpr inline auto fits_mask() const
     {
         if constexpr (size == 4) {
-            return (*reinterpret_cast<const std::uint32_t*>(&raw) & RC4_INVALID_MASK_FLASH) == 0;
+            return (std::bit_cast<const std::uint32_t>(raw) & RC4_INVALID_MASK_FLASH) == 0;
         }
 
         if constexpr (size == 8) {
-            return (*reinterpret_cast<const std::uint64_t*>(&raw) & RC4_INVALID_MASK_SHOCKWAVE) == 0;
+            return (std::bit_cast<const std::uint64_t>(raw) & RC4_INVALID_MASK_SHOCKWAVE) == 0;
         }
 
         std::unreachable();
@@ -125,12 +125,9 @@ constexpr std::vector<rc4_table> check_map_tables(const std::span<const rc4_entr
 {
     std::vector<rc4_table> tables;
 
-    if (buffer.size() < RC4_TABLE_SIZE)
-        return tables;
-
     for(auto it = buffer.begin(); it <= buffer.end() - RC4_TABLE_SIZE; it++)
     {
-        const auto& current_table = reinterpret_cast<const rc4_table_raw<sz>&>(*it);
+        const auto& current_table = *std::start_lifetime_as<const rc4_table_raw<sz>>(&*it);
 
         auto is_good = true;
         for(auto i = 0uz; i < current_table.size(); i++)
@@ -167,12 +164,13 @@ void print_table(const rc4_table& table) noexcept
 template<auto sz>
 void check_and_print_tables_with_offset(const auto& buffer, const std::size_t offset) noexcept
 {
-    const auto span = std::span<const rc4_entry_raw<sz>> { 
-        reinterpret_cast<const rc4_entry_raw<sz>*>(reinterpret_cast<std::uint64_t>(buffer.data()) + offset), 
-        (buffer.size() - offset) / sz 
-    };
+    const auto num_raw_entries = (buffer.size() - offset) / sz;
+    const auto* entry_ptr = std::start_lifetime_as_array<const rc4_entry_raw<sz>>(buffer.data(), num_raw_entries);
 
-    for(const auto& table : check_map_tables<sz>(span))
+    const auto span = std::span<const rc4_entry_raw<sz>> { entry_ptr, num_raw_entries };
+
+    const auto tables = check_map_tables<sz>(span);
+    for(const auto& table : tables)
         print_table(table);
 };
 
